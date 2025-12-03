@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>ESP STATUS — Romit Mohapatra (Pl No 09039)</title>
+  <style>
+    :root{--bg:#f7fafc;--card:#fff;--muted:#6b7280;--accent:#0ea5a4;--danger:#b91c1c}
+    body{font-family:Inter,system-ui,Segoe UI,Roboto,Arial;margin:18px;background:var(--bg);color:#111}
+    header{display:flex;justify-content:space-between;align-items:center}
+    h1{font-size:20px;margin:0}
+    .card{background:var(--card);border-radius:8px;padding:12px;margin:10px 0;box-shadow:0 1px 4px rgba(0,0,0,0.06)}
+    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px}
+    button{padding:8px 10px;border-radius:6px;border:1px solid #cbd5e1;background:#e2e8f0;cursor:pointer}
+    .primary{background:var(--accent);color:#fff;border:none}
+    .muted{color:var(--muted)}
+    table{width:100%;border-collapse:collapse}
+    th,td{padding:8px;border-bottom:1px solid #e6edf3;text-align:left}
+    .spm-red{color:var(--danger);font-weight:700}
+    .stat-pill{display:inline-block;padding:6px 8px;border-radius:999px;background:#eef2f7;margin-right:8px;font-weight:700}
+    .note-error{color:var(--danger);font-weight:700;margin-top:8px}
+    .small{font-size:12px;color:#4b5563}
+    input.spm-input{width:110px;padding:6px;border-radius:6px;border:1px solid #cbd5e1;margin-right:8px}
+    .card-controls{margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    #top-controls{display:flex;gap:8px;align-items:center}
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>ESP STATUS</h1>
+      <div class="muted">Developed by Romit Mohapatra, Pl No 09039</div>
+    </div>
+    <div id="top-controls">
+      <button id="btn-refresh">Refresh</button>
+      <button id="btn-save-all" class="primary" title="Save all entered SPMs">Save All</button>
+    </div>
+  </header>
+
+  <main>
+    <section id="page-main" class="card">
+      <div class="grid" id="summary-grid"></div>
+
+      <div style="margin-top:10px">
+        <button id="btn-boiler-wise" class="primary">BOILER WISE ESP FIELDS</button>
+      </div>
+
+      <div id="boiler-list" class="card" style="display:none; margin-top:10px"></div>
+      <div id="main-note" class="small"></div>
+    </section>
+
+    <section id="page-boiler" class="card" style="display:none">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <div><button id="btn-back">← Back</button></div>
+        <div><strong id="boiler-title">Boiler 1</strong></div>
+      </div>
+
+      <div id="boiler-passes" style="margin-top:12px"></div>
+      <div id="boiler-error" class="note-error" style="display:none"></div>
+    </section>
+  </main>
+
+  <script>
+    // ===== CONFIG =====
+    // Paste your Apps Script web app URL here (deployed URL) to persist data.
+    const API_BASE = 'https://script.google.com/macros/s/AKfycbzA9HpifhMy41qJoCn--wdTvpDzQdgyuumoirfZRul9zsa6DQdekH_4fVwkbdDN-hBX/exec'
+
+    // Boiler config
+    const BOILER_CONFIG = {
+      1: {passes:['A','B','C'], fieldsPerPass:7},
+      2: {passes:['A','B','C'], fieldsPerPass:8},
+      3: {passes:['A','B','C'], fieldsPerPass:7},
+      4: {passes:['A','B'], fieldsPerPass:6},
+      5: {passes:['A','B'], fieldsPerPass:7}
+    };
+
+    // thresholds for coloring
+    const SPM_THRESHOLDS = {1:100,2:100,3:100,4:50,5:50};
+
+    // ===== API helpers =====
+    async function apiGet(action){
+      if(!API_BASE){ console.log('API_BASE empty — GET skipped:', action); return null; }
+      const url = API_BASE + '?action=' + encodeURIComponent(action);
+      const res = await fetch(url);
+      if(!res.ok) throw new Error('GET failed: ' + res.status);
+      return res.json();
+    }
+    async function apiPost(body){
+      if(!API_BASE){ console.log('API_BASE empty — POST skipped:', body); return null; }
+      const res = await fetch(API_BASE, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+      if(!res.ok) throw new Error('POST failed: ' + res.status);
+      return res.json();
+    }
+
+    // ===== UI wiring =====
+    document.getElementById('btn-refresh').addEventListener('click', loadSummary);
+    document.getElementById('btn-save-all').addEventListener('click', saveAllSPMs);
+    document.getElementById('btn-back').addEventListener('click', ()=>{ document.getElementById('page-boiler').style.display='none'; document.getElementById('page-main').style.display='block'; });
+
+    document.getElementById('btn-boiler-wise').addEventListener('click', ()=>{
+      const listDiv = document.getElementById('boiler-list');
+      listDiv.innerHTML = '<h3>Select Boiler</h3>';
+      Object.keys(BOILER_CONFIG).forEach(b => {
+        const btn = document.createElement('button');
+        btn.style.margin = '6px';
+        btn.textContent = 'Boiler ' + b;
+        btn.className = 'primary';
+        btn.onclick = ()=>{ listDiv.style.display='none'; openBoiler(Number(b)); };
+        listDiv.appendChild(btn);
+      });
+      listDiv.style.display = 'block';
+      listDiv.scrollIntoView({behavior:'smooth', block:'center'});
+    });
+
+    // ===== load summary (and render per-pass SPM inputs under each boiler) =====
+    async function loadSummary(){
+      const container = document.getElementById('summary-grid');
+      container.innerHTML = '';
+      document.getElementById('main-note').textContent = '';
+      try{
+        const summary = await apiGet('getSummary'); // may be null if API_BASE empty
+        for(let b=1;b<=5;b++){
+          const key = 'boiler' + b;
+          const d = (summary && summary[key]) || {};
+          const total = d.totalFields ?? (BOILER_CONFIG[b].passes.length * BOILER_CONFIG[b].fieldsPerPass);
+          const charged = d.chargedCount ?? 0;
+          const ash = d.ashCount ?? 0;
+          const overallSPM = d.spm ?? '';
+          const threshold = SPM_THRESHOLDS[b] || 999999;
+          const spmClass = (Number(overallSPM) && Number(overallSPM) > threshold) ? 'spm-red' : '';
+
+          const card = document.createElement('div'); card.className='card';
+          // container for html
+          const wrapper = document.createElement('div');
+          wrapper.innerHTML = `<div><strong>Boiler ${b}</strong></div>
+            <div style="margin-top:8px">
+              <span class="stat-pill">Charged: <strong>${charged}/${total}</strong></span>
+              <span class="stat-pill">Ash level high: <strong>${ash}/${total}</strong></span>
+            </div>
+            <div class="card-controls" style="margin-top:8px; flex-direction:column; align-items:flex-start;">
+              <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+                <label class="small">Overall SPM:</label>
+                <input class="spm-input overall-spm" data-boiler="${b}" type="text" value="${overallSPM ?? ''}" placeholder="Overall SPM"/>
+              </div>
+              <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px;">
+                <!-- pass inputs will be injected here -->
+                <span class="small">Pass SPMs:</span>
+                <span class="pass-inputs" data-boiler="${b}"></span>
+              </div>
+              <div style="margin-top:6px;"><small>Last overall update: ${d.ts ?? '-'}</small></div>
+            </div>
+          `;
+          card.appendChild(wrapper);
+
+          // Open button
+          const openBtn = document.createElement('button'); openBtn.style.marginTop='8px'; openBtn.textContent='Open'; openBtn.onclick = ()=>openBoiler(b);
+          card.appendChild(openBtn);
+
+          container.appendChild(card);
+
+          // Render pass inputs for this boiler based on config
+          const passSpan = card.querySelector('.pass-inputs[data-boiler="'+b+'"]');
+          const passes = BOILER_CONFIG[b].passes;
+          // prefill with server per-pass SPM if available: call getBoiler for the boiler to fetch pass SPMs
+          (async ()=>{
+            let passData = {};
+            try{
+              const server = await apiGet('getBoiler?boiler=' + b);
+              passData = server || {};
+            }catch(e){
+              // ignore — server may be unavailable
+              passData = {};
+            }
+            passes.forEach(p=>{
+              const inp = document.createElement('input');
+              inp.className = 'spm-input pass-spm';
+              inp.type = 'text';
+              inp.placeholder = 'Pass ' + p + ' SPM';
+              inp.dataset.boiler = b;
+              inp.dataset.pass = p;
+              // attempt to set value from server if present
+              if(passData[p] && passData[p].spm !== undefined) inp.value = passData[p].spm;
+              passSpan.appendChild(inp);
+            });
+          })();
+        }
+      }catch(err){
+        console.error('loadSummary error:', err);
+        document.getElementById('main-note').textContent = 'Warning: failed to load summary from backend — per-pass inputs will still appear, but saved data won’t persist until API_BASE is set. See console for details.';
+        // fallback: render cards using config with empty inputs
+        for(let b=1;b<=5;b++){
+          const total = BOILER_CONFIG[b].passes.length * BOILER_CONFIG[b].fieldsPerPass;
+          const card = document.createElement('div'); card.className='card';
+          const wrapper = document.createElement('div');
+          wrapper.innerHTML = `<div><strong>Boiler ${b}</strong></div>
+            <div style="margin-top:8px">
+              <span class="stat-pill">Charged: <strong>0/${total}</strong></span>
+              <span class="stat-pill">Ash level high: <strong>0/${total}</strong></span>
+            </div>
+            <div class="card-controls" style="margin-top:8px; flex-direction:column; align-items:flex-start;">
+              <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+                <label class="small">Overall SPM:</label>
+                <input class="spm-input overall-spm" data-boiler="${b}" type="text" value="" placeholder="Overall SPM"/>
+              </div>
+              <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:6px;">
+                <span class="small">Pass SPMs:</span>
+                <span class="pass-inputs" data-boiler="${b}"></span>
+              </div>
+            </div>`;
+          card.appendChild(wrapper);
+          const openBtn = document.createElement('button'); openBtn.style.marginTop='8px'; openBtn.textContent='Open'; openBtn.onclick = ()=>openBoiler(b);
+          card.appendChild(openBtn);
+          container.appendChild(card);
+
+          // render pass inputs locally
+          const passSpan = card.querySelector('.pass-inputs[data-boiler="'+b+'"]');
+          BOILER_CONFIG[b].passes.forEach(p=>{
+            const inp = document.createElement('input'); inp.className='spm-input pass-spm'; inp.type='text'; inp.placeholder = 'Pass ' + p + ' SPM';
+            inp.dataset.boiler = b; inp.dataset.pass = p;
+            passSpan.appendChild(inp);
+          });
+        }
+      }
+    }
+
+    // ===== save all handler =====
+    async function saveAllSPMs(){
+      // Gather all overall and pass inputs
+      const overallInputs = Array.from(document.querySelectorAll('input.overall-spm'));
+      const passInputs = Array.from(document.querySelectorAll('input.pass-spm'));
+      const actions = [];
+
+      // Overall values
+      overallInputs.forEach(inp => {
+        const boiler = Number(inp.dataset.boiler);
+        const val = String(inp.value).trim();
+        if(val !== '') actions.push({boiler:boiler, pass:'Overall', spm: val});
+      });
+
+      // Per-pass values
+      passInputs.forEach(inp => {
+        const boiler = Number(inp.dataset.boiler);
+        const pass = inp.dataset.pass;
+        const val = String(inp.value).trim();
+        if(val !== '') actions.push({boiler:boiler, pass:pass, spm: val});
+      });
+
+      if(actions.length === 0){
+        alert('No SPM values entered to save.');
+        return;
+      }
+
+      // Confirm quick summary
+      if(!confirm('Save ' + actions.length + ' SPM entries to backend?')) return;
+
+      // Send each as setSPM to backend (serially to keep order)
+      try{
+        for(const a of actions){
+          await apiPost({action:'setSPM', boiler: a.boiler, pass: a.pass, spm: a.spm});
+        }
+        alert('All SPMs saved.');
+        await loadSummary();
+      }catch(err){
+        console.error('saveAllSPMs error:', err);
+        alert('Failed to save SPMs — see console. If API_BASE is empty, set it to your Apps Script URL to persist.');
+      }
+    }
+
+    // ===== openBoiler (now WITHOUT pass SPM inputs) =====
+    async function openBoiler(boilerNo){
+      console.log('openBoiler', boilerNo);
+      document.getElementById('page-main').style.display='none';
+      document.getElementById('page-boiler').style.display='block';
+      document.getElementById('boiler-error').style.display = 'none';
+      document.getElementById('boiler-title').textContent = 'Boiler ' + boilerNo;
+
+      const passesDiv = document.getElementById('boiler-passes');
+      passesDiv.innerHTML = '';
+
+      const cfg = BOILER_CONFIG[boilerNo];
+      if(!cfg){ passesDiv.innerHTML = '<div class="note-error">Configuration error: boiler not found.</div>'; return; }
+
+      // Render passes and fields (no SPM inputs here)
+      for(const pass of cfg.passes){
+        const passCard = document.createElement('div'); passCard.className='card';
+        passCard.innerHTML = `<h3>Pass ${pass}</h3>`;
+
+        // Fields table only (status + remark + Save)
+        const table = document.createElement('table');
+        const thead = document.createElement('thead'); thead.innerHTML = '<tr><th>Field</th><th>Status</th><th>Remark</th><th>Action</th></tr>';
+        table.appendChild(thead);
+        const tbody = document.createElement('tbody');
+        for(let f=1; f<=cfg.fieldsPerPass; f++){
+          const tr = document.createElement('tr');
+          const tdField = document.createElement('td'); tdField.textContent = 'Field ' + f;
+          const tdStatus = document.createElement('td');
+          const sel = document.createElement('select');
+          ['charged','trip','ash level high','shutdown'].forEach(opt => { const o = document.createElement('option'); o.value = o.textContent = opt; sel.appendChild(o); });
+          tdStatus.appendChild(sel);
+          const tdRemark = document.createElement('td'); const inpRemark = document.createElement('input'); inpRemark.type = 'text';
+          tdRemark.appendChild(inpRemark);
+          const tdAction = document.createElement('td'); const btnSave = document.createElement('button'); btnSave.textContent='Save';
+          btnSave.onclick = async ()=>{
+            try{
+              await apiPost({action:'setField', boiler:boilerNo, pass:pass, field:f, status:sel.value, remark:inpRemark.value});
+              alert('Saved');
+              await loadSummary();
+            }catch(e){
+              alert('Failed to save field — see console');
+              console.error('setField error', e);
+            }
+          };
+          tdAction.appendChild(btnSave);
+          tr.append(tdField, tdStatus, tdRemark, tdAction);
+          tbody.appendChild(tr);
+        }
+        table.appendChild(tbody);
+        passCard.appendChild(table);
+        passesDiv.appendChild(passCard);
+      }
+
+      // populate field status & remarks from server if available
+      try{
+        const serverData = await apiGet('getBoiler?boiler=' + boilerNo);
+        if(serverData){
+          for(const pass of Object.keys(serverData)){
+            const pd = serverData[pass];
+            const passCard = Array.from(passesDiv.querySelectorAll('div.card')).find(c => c.querySelector('h3') && c.querySelector('h3').textContent.trim() === ('Pass ' + pass));
+            if(!passCard) continue;
+            if(pd.fields){
+              for(const fn in pd.fields){
+                const fieldNo = Number(fn);
+                const row = Array.from(passCard.querySelectorAll('tbody tr')).find(r => r.firstChild && r.firstChild.textContent.trim() === ('Field ' + fieldNo));
+                if(!row) continue;
+                const sel = row.querySelector('select');
+                const inp = row.querySelector('input[type=text]');
+                if(sel && pd.fields[fieldNo].status) sel.value = pd.fields[fieldNo].status;
+                if(inp && pd.fields[fieldNo].remark) inp.value = pd.fields[fieldNo].remark;
+              }
+            }
+          }
+        }
+      }catch(err){
+        console.warn('Failed to load boiler data from server — UI still usable. Error:', err);
+        const be = document.getElementById('boiler-error');
+        be.style.display = 'block';
+        be.textContent = 'Note: failed to load saved data from backend (check API_BASE, deployment & console). You can still fill values and press Save.';
+      }
+    }
+
+    // ===== initial load =====
+    loadSummary();
+  </script>
+</body>
+</html>
